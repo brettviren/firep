@@ -1,0 +1,31 @@
+[project]
+name = "firep"
+version = "0.1.0"
+description = "FIeld REsponse via PINNs: SIREN solutions of the Laplace equation for LArTPC electrode geometries"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Brett Viren", email = "brett.viren@gmail.com" }]
+dependencies = [
+    "click>=8.1",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "torch>=2.0",
+]
+
+[project.scripts]
+firep = "firep.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/firep"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

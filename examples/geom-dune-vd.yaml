@@ -1,0 +1,49 @@
+# DUNE vertical-drift anode: strips etched on two perforated PCBs.
+#
+#   PCB 1 (cathode-facing): grid on the top face, U strips on the bottom
+#   PCB 2                 : V strips on the top face, W strips on the bottom
+#
+# Charge reaches the lower views through holes drilled through both boards.
+# The holes form a tight-packed equilateral-triangle lattice aligned with the
+# strips: the narrow gap between two strips always bisects a row of holes, so
+# every hole is either wholly inside a strip or split between two neighbours.
+#
+# That alignment fixes the lattice.  With a row spacing d the collection pitch
+# is 2d and the induction pitch 3d, so
+#
+#   d = 5.1/2 = 7.65/3 = 2.55 mm    (row spacing)
+#   a = 2d/sqrt(3)     = 2.9444864 mm  (along a row, equilateral)
+#
+# and the induction views are centred so that a gap, not a strip, sits on the
+# origin -- which is what puts their gaps on rows too.  The stereo angles below (0, +-60 deg) are the choice that keeps
+# all three views commensurate with one triangular lattice; strip pitches and
+# the 0.5 mm inter-strip gap are the DUNE VD TDR values, the hole radius and the
+# board spacings are representative.
+version: 1
+name: dune-vd-strips-holes
+domain:
+  dimension: 3
+  bounds: {x: [-17.85, 17.85], y: [-10.0, 100.0], z: [-17.85, 17.85]}
+electrodes:
+  - {name: grid, kind: strip, role: grid, plane: 8.2,
+     shape: {width: 4.6, thickness: 0.035},
+     lattice: {pitch: 5.1, count: 7, angle: 0.0}}
+  - {name: u, kind: strip, role: induction, plane: 5.0,
+     shape: {width: 7.15, thickness: 0.035},
+     lattice: {pitch: 7.65, count: 6, angle: 60.0}}
+  - {name: v, kind: strip, role: induction, plane: 3.2,
+     shape: {width: 7.15, thickness: 0.035},
+     lattice: {pitch: 7.65, count: 6, angle: -60.0}}
+  - {name: w, kind: strip, role: collection, plane: 0.0,
+     shape: {width: 4.6, thickness: 0.035},
+     lattice: {pitch: 5.1, count: 7, angle: 0.0}}
+  # The perforations, through each board in turn.  offset shifts the rows onto
+  # the strip centres and gaps; stagger makes the lattice triangular.
+  - {name: holes1, kind: hole, role: aperture, plane: 6.6,
+     shape: {radius: 1.0, thickness: 3.2},
+     lattice: {pitch: 2.55, count: 14, offset: 1.275,
+               pitch_z: 2.9444864, count_z: 13, stagger: true}}
+  - {name: holes2, kind: hole, role: aperture, plane: 1.6,
+     shape: {radius: 1.0, thickness: 3.2},
+     lattice: {pitch: 2.55, count: 14, offset: 1.275,
+               pitch_z: 2.9444864, count_z: 13, stagger: true}}

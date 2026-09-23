@@ -1,0 +1,17 @@
+# MicroBooNE-style 3D crossing wire planes.  Describable and drawable today;
+# the Laplace solver is still 2D, so `firep geometry` works and `firep train`
+# reports what is missing.
+#
+#   firep geometry -c examples/geom-microboone-3d.yaml -o uboone.pdf
+version: 1
+name: microboone-3d-wires
+domain:
+  dimension: 3
+  bounds: {x: [-15.0, 15.0], y: [-10.0, 100.0], z: [-15.0, 15.0]}
+electrodes:
+  - {name: u, kind: wire, role: induction,  plane: 6.0,
+     shape: {radius: 0.075}, lattice: {pitch: 3.0, count: 10, angle:  60.0}}
+  - {name: v, kind: wire, role: induction,  plane: 3.0,
+     shape: {radius: 0.075}, lattice: {pitch: 3.0, count: 10, angle: -60.0}}
+  - {name: y, kind: wire, role: collection, plane: 0.0,
+     shape: {radius: 0.075}, lattice: {pitch: 3.0, count: 10, angle:   0.0}}

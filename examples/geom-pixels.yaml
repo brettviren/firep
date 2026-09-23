@@ -1,0 +1,11 @@
+# Pixel anode: one plane of pad electrodes, all nominally collection, but a pad
+# sees a bipolar induced signal when charge is collected on its neighbours.
+version: 1
+name: pixel-pads
+domain:
+  dimension: 3
+  bounds: {x: [-12.0, 12.0], y: [-10.0, 100.0], z: [-12.0, 12.0]}
+electrodes:
+  - {name: pad, kind: pad, role: collection, plane: 0.0,
+     shape: {width: 3.0, length: 3.0, thickness: 0.035},
+     lattice: {pitch: 4.0, count: 6, pitch_z: 4.0, count_z: 6}}

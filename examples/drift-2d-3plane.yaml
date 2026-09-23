@@ -1,0 +1,42 @@
+# The default 2D model, written out explicitly as a starting point.
+#
+#   firep bias  -c examples/drift-2d-3plane.yaml
+#   firep train -c examples/drift-2d-3plane.yaml -o drift.pt
+#
+# Only the keys you want to change need to be present in a config file;
+# everything else is merged from the built-in defaults.  `firep config -c FILE`
+# prints the fully expanded result.
+version: 1
+name: lartpc-2d-3plane-drift
+
+domain:
+  dimension: 2
+  bounds:
+    x: [-2.5, 2.5]        # half a pitch either side of the central wire
+    y: [-10.0, 100.0]     # ground plane at -10 mm, cathode at +100 mm
+  boundaries:
+    x: {type: periodic}
+    ylo: {type: dirichlet, role: ground,  potential: 0.0}
+    yhi: {type: dirichlet, role: cathode, potential: auto}
+
+electrodes:
+  - {name: u, kind: wire, role: induction,  plane: 10.0,
+     shape: {radius: 0.075}, lattice: {pitch: 5.0, count: 1}}
+  - {name: v, kind: wire, role: induction,  plane: 5.0,
+     shape: {radius: 0.075}, lattice: {pitch: 5.0, count: 1}}
+  - {name: w, kind: wire, role: collection, plane: 0.0,
+     shape: {radius: 0.075}, lattice: {pitch: 5.0, count: 1}}
+
+bias:
+  mode: transparency
+  drift_field: 500.0        # V/cm, nominal
+  anchor: cathode_uniform   # or drift_region, to pin the drift field instead
+  margin: 1.0               # >1 buys headroom on the transparency criterion
+  collection_reverse_ratio: 1.0
+
+problem:
+  kind: drift
+
+train:
+  steps: 20000
+  device: auto

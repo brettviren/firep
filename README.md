@@ -19,6 +19,43 @@ uv venv
 uv pip install -e ".[test]"
 ```
 
+### CPU or GPU
+
+Everything runs on the CPU, and `device: auto` (the default) uses a GPU only when
+PyTorch can actually drive one. Nothing needs a GPU except `learn-response`,
+which is impractically slow without one. PyTorch wheels are built for a CUDA
+version, and a wheel newer than the installed driver falls back to the CPU with a
+warning. To use an older driver, install the matching wheel, for example for a
+CUDA 12.5 driver:
+
+```bash
+uv pip install --index-url https://download.pytorch.org/whl/cu124 torch
+```
+
+Measured per training step (float32, default batch), before and after the two
+changes below:
+
+| model | CPU, 8 threads | GPU (RTX 4090) |
+|---|---|---|
+| 3-wire drift, old → new | 88 → 52 ms | 9.1 → 5.2 ms |
+| 21-wire weighting, old → new | 192 → 117 ms | 33.4 → 6.9 ms |
+
+The two changes, both on by default and both exact:
+
+* `train.laplacian: explicit` computes the SIREN's Laplacian by propagating
+  each unit's value, gradient and Laplacian forward through the sine layers
+  (∇² sin z = cos z ∇²z − sin z |∇z|²). This is the same exact derivative
+  autograd gives, agreeing to 10⁻¹⁵ in float64, without nested backward passes.
+  `autograd` remains available as the reference.
+* `sampling.backend: torch` draws collocation points on the training device.
+  For the 21-wire weighting model the NumPy sampler and its host-to-device copy
+  were half of every GPU step. The distributions are the same; the random
+  streams differ, so `numpy` reproduces older runs exactly.
+
+float64 does not converge faster. The loss follows float32 step for step, and
+the conductor error (0.022 V) is set by the analytic warm start, not by
+precision. It costs 1.6× per step on the CPU and 2.8× on the GPU.
+
 ## Quick start
 
 ```bash
@@ -465,6 +502,195 @@ analytic basis.)
 
 ---
 
+## Example: ProtoDUNE-SP, four wire planes
+
+`examples/drift-2d-pdsp.yaml` and `examples/weighting-2d-pdsp.yaml` describe
+the ProtoDUNE single-phase anode, which is also the field response used for
+ProtoDUNE-HD. A **grid plane** G above the three sensing planes partly shields
+U from long-range induction, and a grounded **mesh** M closes the domain below W.
+All potentials are explicit (`bias.mode: explicit`):
+
+| plane | y [mm] | V [V] |
+|---|---|---|
+| C (cathode, face) | 204.71 | −10235.5 |
+| G (grid) | 14.13 | −665 |
+| U | 9.42 | −370 |
+| V | 4.71 | 0 |
+| W (collection) | 0.00 | +820 |
+| M (mesh, face) | −4.79 | 0 |
+
+The pitch is 4.71 mm on every plane and the wire radius is 0.076 mm (152 µm
+CuBe), matching the Garfield model in Wire-Cell's
+`dune-garfield-1d565.json.bz2`. The cathode is −10235.5 V = −500 V/cm × 20.471 cm
+from the mesh: electrons drift toward −y, so the cathode is the most negative
+electrode.
+
+```bash
+scripts/run-pdsp.sh                  # ~25 min: trained drift solve, everything else
+STEPS_DRIFT=0 scripts/run-pdsp.sh    # ~2 min: analytic drift solve
+```
+
+It writes everything into `runs/pdsp/`: the drift maps (`drift-zoom.png` with
+streamlines), the weighting maps (`weight-{u,v,w}{,-zoom}.png`), the response
+waveforms (`response-{curves,impacts,heatmap}.png`), the wire-vs-time tables
+with their zooms (`response-table{,-zoom,-zoom2}.png`) and the Garfield
+comparison (`compare-waveforms{,-zoom}.png`, `garfield-table{,-zoom}.png`
+beside `firep-y100-table{,-zoom}.png`, and `compare.txt`).
+`scripts/pdsp_figs.py` looks for the Garfield file on `$WIRECELL_PATH`, or takes
+the path as its second argument (`GARFIELD=` for the run script).
+
+**Bias.** Gap fields are 503 → 635 → 791 → 962 V/cm, then −1007 V/cm below W.
+The BCH ratios are 1.262 (G), 1.245 (U) and **1.216 (V), just under the
+1.226 required**. BCH is a sufficient condition, not a necessary one: all 200
+traced electrons still collect on W and none stop on G, U or V.
+
+**Solve.** The analytic warm start alone is 0.023 V on the conductors
+(span 11 kV) and exact on the faces. Twenty thousand training steps leave that
+unchanged, and the gap fields and line charges agree to 1e-3 and 1e-7. The
+weighting solves are analytic only (≤ 5e-4 V on any conductor).
+
+**Response** (launched at the cathode): the collecting wire gets 0.998 e and no
+induction wire gets more than 3e-4 e. G does what it is there for. U's
+weighting potential at the cathode is 8e-5, compared with 6e-4 for the
+unshielded 3-plane toy.
+
+**Against Garfield.** Both are launched at y = 100 mm (Garfield's origin). Once
+the arrival time is aligned (Garfield comes in 3.7 µs later, about 2 µs of it
+from its 1.565 mm/µs drift speed against Walkowiak's 1.628), the waveforms agree
+closely:
+
+```
+plane  u[mm]   peak+ firep  Garfield   peak- firep  Garfield     Q firep  Garfield   rms diff / peak
+  u    0.00       0.3095    0.3045     -0.3022   -0.3033     -0.0045   -0.0021       0.078
+  u    1.88       0.0938    0.0940     -0.1006   -0.1026     -0.0045   -0.0027       0.037
+  v    0.00       0.2267    0.2296     -0.5568   -0.4694     -0.0007    0.0004       0.020
+  v    4.71       0.0299    0.0305     -0.2112   -0.1878     -0.0009   -0.0009       0.017
+  w    0.00       3.7828    3.3928     -0.0035   -0.0021      0.9977    0.9861       0.015
+  w    1.88       3.3976    2.7657      0.0000    0.0000      0.9968    1.0059       0.045
+```
+
+Currents are in e/µs and charges in e. Wire-Cell stores e/ns with the sign of
+the electron charge, so the conversion factor is −1000. The last-tick spikes,
+where the electron hits a wire, are what differ most. Their height depends on
+where the singular final approach falls within a 0.1 µs tick, in both codes;
+Garfield's own collection charge scatters by ±2% between impacts. At the
+cell edge (u = 2.355 mm) the two codes send the electron to different
+wires. That line is a saddle of the drift field, so either answer is correct.
+Launching at 100 mm truncates U's Ramo integral by φ(100 mm) = 4.5e-3 in
+both codes. That is why U's Q is −0.0045 rather than 0, and Garfield's is
+similar.
+
+### Learning the same response directly
+
+`firep learn-response` learns the PDSP field response without tracing a single
+electron (technical note Sec. 15.4). The induced charge is treated as a field
+of launch point and elapsed time, 𝒬(r, t) = −q φ(X_t(r)). It obeys the backward
+transport equation ∂_t𝒬 = v·∇𝒬 with 𝒬(r, 0) = −q φ(r), and a SIREN is trained on
+that residual alone. No response is ever a target: the drift and weighting
+solutions enter only as the coefficient v and the initial data. So the traced
+response, and Ramo's sum rule (the long-time limit of 𝒬, which is not in the
+loss), are independent checks.
+
+```bash
+firep learn-response -c examples/drift-2d-pdsp.yaml -d runs/pdsp/drift.pt \
+    -w runs/pdsp/weight-u.pt -w runs/pdsp/weight-v.pt -w runs/pdsp/weight-w.pt \
+    -o runs/pdsp/direct.pt                          # ~20 min on one RTX 4090
+firep direct-response -c examples/drift-2d-pdsp.yaml runs/pdsp/direct.pt \
+    --impacts 11 -o runs/pdsp/response-direct.npz  # same .npz layout as `firep response`
+scripts/pdsp_direct_figs.py runs/pdsp              # plots and the comparison
+```
+
+`scripts/run-pdsp.sh` runs all of this as its last stage (`DIRECT=0` skips it).
+The same plots are made for the learned response
+(`direct-response-{curves,impacts,heatmap}.png`,
+`direct-response-table{,-zoom,-zoom2}.png`). The comparison with the traced
+response is in `compare-direct-{waveforms,waveforms-zoom,table,charge}.png` and
+`compare-direct.txt`. `direct-field.png` shows the learned field 𝒬_w0(r, t)
+itself, `direct-arrival.png` the arrival-time check, and `direct-losses.png` the
+training history.
+
+**What it took.** Five things beyond the bare equation, each physics rather than
+tuning (`firep/direct.py` has the details, technical note Secs. 15.4 and 16 the
+reasons):
+
+* **The invariant half cell.** v_x = 0 on the line through a wire and midway
+  between two, so no trajectory crosses either. The half cell between them is
+  solved alone, with no side conditions. The separatrix is then a side of the
+  domain rather than a jump inside it. The 21-pitch field of one wire unfolds
+  onto the half cell as 63 outputs (3 planes × 21 wire offsets).
+* **The weighting of the residual.** The error in 𝒬 grows as ∫R dt = ∫R/|v| ds
+  along a path, which argues for weighting per unit path. That was needed while
+  the next item was wrong, because per unit time the false boundary layers
+  dominated and training blew up. Once they were gone, per unit time
+  (`normalise: time`, the default) is better. It stops the fast final approach,
+  which makes the collection spike, from being down-weighted.
+* **The conductor condition only where electrons arrive.** This is measured
+  from the solved field as the sign of v·n on each wire. G and U repel all round
+  and W absorbs all round. V absorbs on 9% of its surface, which is its 0.8%
+  shortfall on the BCH ratio seen from the other side; no drift-volume electron
+  reaches that arc. Imposing the condition on the repelling wires, as the first
+  version did, was the largest single error: a false boundary layer every
+  passing path had to cross.
+* **The arrival time as an input.** The collection kink sits on t = T(r), a
+  surface through the whole domain that a smooth network rounds. T is learned
+  first from its own stationary equation, v·∇T = −1 with T = 0 on W, again from
+  the residual alone. The time-to-go T(r) − t is then a network input, which
+  aligns the kink with one coordinate. Checked against traced paths afterwards,
+  the learned T is within 0.022 µs of the traced time-to-go everywhere below y_R.
+* **The wire's logarithm, handed over.** Near W, φ ~ ln ρ, and the electron closes
+  the last stretch at speed v. So 𝒬 ~ ln(1 + v s/a) in the time-to-go s: the
+  collection spike is the wire's logarithm carried into time, tens of ns wide.
+  Neither a higher ω₀ nor more points resolves it. `arrival_log: 0.03` supplies
+  ln(1 + relu(T − t)/τ_a) as an input, the response's counterpart of the ψ
+  columns in B_c. That input needs matched sampling, or the network rings between
+  collocation points (aliasing): `arrival_time_fraction: 0.25` draws a quarter of
+  each batch at times close to each point's own arrival.
+
+Above y_R = G + 1.5 pitches the drift is a uniform translation, so there 𝒬 is
+the weighting potential shifted in closed form. The network works only in the
+22 mm × 2.355 mm × 20 µs region below it.
+
+**Against the traced response**, on the centred impacts. The two stagnation
+lines x = 0 and x = p/2, where an exact electron never arrives, are excluded:
+
+```
+Ramo sum rule (not in the loss): W collects 1.001-1.003 e (traced 0.997-0.998);
+                                 U and V net charge |Q| < 0.004 e
+waveforms, 0.1 us ticks:  rms difference 0.42 % (u), 0.34 % (v), 0.23 % (w) of the peak
+waveforms, 0.5 us ADC:    rms difference 0.31 % (u), 0.48 % (v), 0.21 % (w) of the peak
+collection peak, 0.1 us:  3.38 e/us learned, 4.04 traced
+spike on a 0.02 us tick:  4.4 e/us, 84 ns FWHM learned; 7.4 e/us, 47 ns traced
+V dip on a 0.02 us tick:  -0.65 e/us learned, -0.96 traced
+timing:                   no offset (cross-correlation)
+```
+
+The spike is now resolved to within a factor of two in width. The previous
+default (kept as `runs/pdsp/direct-v1.pt`, with its outputs as `*-v1.*`) reached
+1.9 e/µs and 264 ns on the same fine tick. The price is on U. There the residual
+ringing leaves an error of 0.42% of peak against 0.30% before, and 0.28% for
+per-time weighting without the logarithmic input. The default favours the
+collection signal, which carries the charge. Set `arrival_log: 0` and
+`arrival_time_fraction: 0` for the smoothest induction waveforms. The traced
+peak is itself unreliable at 0.1 µs binning: from one launch height to another
+it moves between 2.3 and 4.1 e/µs, depending only on where the spike falls
+within a tick. The learned table also carries speckle at the 10⁻³-of-peak level
+where the translation hands over to the network, and a small tail after arrival
+where the traced current is exactly zero.
+
+`runs/pdsp/exp/` holds the experiments that led here, with `summary.txt` and
+`spike-experiments.png`. Section 16 of the technical note sets them out:
+ω₀ = 400, the same with 4× the samples, per-time weighting, the logarithmic
+input, matched sampling, and their combinations.
+
+Choosing between trained models by the sum rule is legitimate, because it uses
+no traced response. By that measure, longer training is not automatically
+better. A 150k-step run with twice the batch (kept as `runs/pdsp/direct-150k.pt`)
+collected only 0.981-0.986 e, against 0.993-0.999 for 60k steps at the same
+settings.
+
+
+---
+
 ## Ionization, electronics and readout
 
 `firep signal` takes a field response, drifts an ideal ionization track to the
@@ -631,6 +857,7 @@ sampling:
   n_surface: 256                  # boundary points per conductor
   resample_every: 1
   seed: 20260918
+  backend: torch                  # torch draws on the training device | numpy
 
 train:
   steps: 20000
@@ -644,6 +871,7 @@ train:
   log_every: 200
   device: auto                    # auto | cpu | cuda | cuda:1
   precision: float32              # float64 is worth it for residual studies
+  laplacian: explicit             # explicit (forward-propagated) | autograd
   seed: 20260918
 
 grid: {nx: 201, ny: 441}          # default evaluation grid for `firep sample`

@@ -1,0 +1,55 @@
+# ProtoDUNE Single-Phase (PDSP) wire planes, drift solve.
+#
+# Four wire planes -- the grid (G), two induction (U, V) and collection (W) --
+# between the cathode (C) and a grounded mesh (M).  G partly shields U from the
+# long-range induction of the approaching charge.  The same field response
+# serves ProtoDUNE-HD.  All voltages are given explicitly:
+#
+#   plane    y [mm]    V [V]
+#   C      204.71   -10235.5     (500 V/cm x 20.471 cm from the mesh)
+#   G       14.13     -665
+#   U        9.42     -370
+#   V        4.71        0
+#   W        0.00      820
+#   M       -4.79        0
+#
+# Pitch 4.71 mm on every plane and 0.152 mm (CuBe) wire diameter, matching the
+# Garfield model behind wire-cell-data/dune-garfield-1d565.json.bz2.
+#
+#   firep bias  -c examples/drift-2d-pdsp.yaml
+#   firep train -c examples/drift-2d-pdsp.yaml -o drift.pt
+version: 1
+name: pdsp-2d-drift
+
+domain:
+  dimension: 2
+  bounds:
+    x: [-2.355, 2.355]     # half a pitch either side of the central wire
+    y: [-4.79, 204.71]     # mesh to cathode
+  boundaries:
+    x: {type: periodic}
+    ylo: {type: dirichlet, role: mesh,    potential: 0.0}
+    yhi: {type: dirichlet, role: cathode, potential: -10235.5}
+
+electrodes:
+  - {name: g, kind: wire, role: grid,       plane: 14.13, bias: -665.0,
+     shape: {radius: 0.076}, lattice: {pitch: 4.71, count: 1}}
+  - {name: u, kind: wire, role: induction,  plane: 9.42,  bias: -370.0,
+     shape: {radius: 0.076}, lattice: {pitch: 4.71, count: 1}}
+  - {name: v, kind: wire, role: induction,  plane: 4.71,  bias: 0.0,
+     shape: {radius: 0.076}, lattice: {pitch: 4.71, count: 1}}
+  - {name: w, kind: wire, role: collection, plane: 0.0,   bias: 820.0,
+     shape: {radius: 0.076}, lattice: {pitch: 4.71, count: 1}}
+
+bias:
+  mode: explicit
+  drift_field: 500.0
+
+problem:
+  kind: drift
+
+response:
+  impacts: 6               # 0, 0.1, ..., 0.5 pitch -- the Garfield impact grid
+  max_time: 300.0          # ~205 mm of drift at ~1.6 mm/us
+
+grid: {nx: 201, ny: 841}

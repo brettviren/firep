@@ -27,6 +27,14 @@ figs: $(STAMP)
 $(STAMP): ../scripts/make_figs.py ../src/firep/plot.py ../src/firep/electronics.py
 	$(PYTHON) ../scripts/make_figs.py $(RUNDIR) $(FIGDIR)
 
+# Sec. 16: evaluated from the PDSP learned-response runs, when they exist.
+BWRUN   := ../runs/pdsp
+figs: $(FIGDIR)/bandwidth.tex
+$(FIGDIR)/bandwidth.tex: ../scripts/bandwidth_figs.py ../src/firep/direct.py
+	@if [ -f $(BWRUN)/direct.pt ] && [ -d $(BWRUN)/exp ]; then \
+	    $(PYTHON) ../scripts/bandwidth_figs.py $(BWRUN) $(FIGDIR); \
+	else echo "no $(BWRUN)/direct.pt: skipping Sec. 16"; fi
+
 pdf: $(DOC).pdf
 
 $(DOC).pdf: $(DOC).tex $(SECTIONS) $(STAMP)

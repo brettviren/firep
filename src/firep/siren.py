@@ -343,10 +343,12 @@ class HarmonicBaseline(nn.Module):
         """
         if self.mode != "wires":
             return float("nan")
-        a = self.basis(xy).double()
-        b = (target[:, None] - self.linear_part(xy)).double()
+        # A small, badly conditioned system: solve it in float64 on the CPU,
+        # where the SVD-based driver exists (CUDA offers only "gels").
+        a = self.basis(xy).double().cpu()
+        b = (target[:, None] - self.linear_part(xy)).double().cpu()
         sol = torch.linalg.lstsq(a, b, driver="gelsd").solution
-        self.coeff.copy_(sol[:, 0].to(self.coeff.dtype))
+        self.coeff.copy_(sol[:, 0].to(device=self.coeff.device, dtype=self.coeff.dtype))
         return float((a @ sol - b).pow(2).mean().sqrt())
 
 
@@ -400,6 +402,47 @@ class FieldModel(nn.Module):
 
     def forward(self, xy: torch.Tensor) -> torch.Tensor:
         return self.baseline(xy) + self.network_part(xy)
+
+    def network_laplacian(self, xy: torch.Tensor) -> torch.Tensor:
+        """``lap network_part`` in closed form, by forward propagation.
+
+        Every layer of a SIREN is ``h = sin(w (W a + b))``, so the value, the
+        gradient and the Laplacian of each hidden unit follow from those of the
+        layer below by the chain rule,
+
+        .. math::
+
+            \nabla h = \cos z\,\nabla z, \qquad
+            \nabla^2 h = \cos z\,\nabla^2 z - \sin z\,|\nabla z|^2,
+
+        with ``z = w (W a + b)`` linear in the layer below.  The encoding's
+        derivatives are equally explicit.  This is the same exact derivative
+        automatic differentiation computes (they agree to round-off), obtained
+        in one forward sweep instead of nested backward passes; it is about
+        1.5x faster per training step and differentiable in the parameters in
+        the ordinary way.
+        """
+        enc, net = self.encoding, self.net
+        k = (2.0 * math.pi / enc.period) * enc.modes[None, :]
+        ph = xy[:, 0:1] * k
+        s, c = torch.sin(ph), torch.cos(ph)
+        zero = torch.zeros_like(xy[:, :1])
+        h = torch.cat((s, c, (xy[:, 1:2] - enc.y_center) / enc.y_scale), 1)
+        gx = torch.cat((k * c, -k * s, zero), 1)
+        gy = torch.cat((torch.zeros_like(s), torch.zeros_like(c), zero + 1.0 / enc.y_scale), 1)
+        lp = torch.cat((-k * k * s, -k * k * c, zero), 1)
+        for layer in net.body:
+            w, lin = layer.omega, layer.linear
+            z = w * lin(h)
+            zx = w * (gx @ lin.weight.T)
+            zy = w * (gy @ lin.weight.T)
+            zl = w * (lp @ lin.weight.T)
+            sn, cs = torch.sin(z), torch.cos(z)
+            gx, gy = cs * zx, cs * zy
+            lp = cs * zl - sn * (zx * zx + zy * zy)
+            h = sn
+        # The read-out is linear and its bias is constant.
+        return self.output_scale * (lp @ net.head.weight.T)
 
 
 # --------------------------------------------------------------------------

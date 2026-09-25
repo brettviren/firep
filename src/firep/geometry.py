@@ -12,6 +12,7 @@ provide, so adding one is local to this module.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -216,6 +217,101 @@ class Sampler:
         )
         xy[:, 0] = g.wrap_x(xy[:, 0])
         return xy, g.cv[which]
+
+
+class TorchSampler:
+    """The same draws as :class:`Sampler`, made directly on the training device.
+
+    Drawing on the device removes the per-step NumPy work and host-to-device
+    copy, which for a 21-wire weighting solve on a GPU was half of every step.
+    It is also faster on the CPU, where the distance test runs in one
+    vectorised pass.  The distributions are identical to :class:`Sampler`'s;
+    the random streams are not, so a run is reproducible only within one
+    backend.
+    """
+
+    def __init__(self, geom: Geometry, seed: int, near_factor: float = 20.0,
+                 surface_margin: float = 1e-3, device=None, dtype=None):
+        import torch
+
+        self.torch = torch
+        self.geom = geom
+        self.device = torch.device(device or "cpu")
+        self.dtype = dtype or torch.get_default_dtype()
+        self.gen = torch.Generator(device=self.device)
+        self.gen.manual_seed(int(seed))
+        self.near_factor = near_factor
+        self.surface_margin = surface_margin
+
+        def t(a):
+            return torch.as_tensor(np.asarray(a, dtype=float), device=self.device,
+                                   dtype=self.dtype)
+
+        self.cx, self.cy, self.cr, self.cv = t(geom.cx), t(geom.cy), t(geom.cr), t(geom.cv)
+
+    def _u(self, n: int, lo: float = 0.0, hi: float = 1.0):
+        return lo + (hi - lo) * self.torch.rand(n, device=self.device, dtype=self.dtype,
+                                                generator=self.gen)
+
+    def _wrap(self, x):
+        g = self.geom
+        return g.xlo + self.torch.remainder(x - g.xlo, g.width)
+
+    def _outside(self, xy):
+        g = self.geom
+        if len(self.cx) == 0:
+            return self.torch.ones(len(xy), dtype=self.torch.bool, device=self.device)
+        dx = xy[:, None, 0] - self.cx[None, :]
+        dx = dx - g.width * self.torch.round(dx / g.width)
+        d = self.torch.hypot(dx, xy[:, None, 1] - self.cy[None, :]) - self.cr[None, :]
+        return d.min(dim=1).values >= self.surface_margin
+
+    def bulk(self, n: int):
+        g = self.geom
+        torch = self.torch
+        out = xy = torch.empty((0, 2), device=self.device, dtype=self.dtype)
+        for _ in range(32):
+            need = n - len(out)
+            if need <= 0:
+                break
+            m = min(max(int(need * 1.2), 64), 4 * n + 1024)
+            xy = torch.stack((self._u(m, g.xlo, g.xhi), self._u(m, g.ylo, g.yhi)), 1)
+            out = torch.cat((out, xy[self._outside(xy)]))
+        return out[:n]
+
+    def near(self, n: int):
+        g = self.geom
+        torch = self.torch
+        nc = len(self.cx)
+        if nc == 0 or n <= 0:
+            return torch.empty((0, 2), device=self.device, dtype=self.dtype)
+        which = torch.randint(0, nc, (n,), device=self.device, generator=self.gen)
+        r_in = self.cr[which] * (1.0 + self.surface_margin)
+        r_out = self.cr[which] * self.near_factor
+        r = r_in * (r_out / r_in) ** self._u(n)
+        th = self._u(n, 0.0, 2.0 * math.pi)
+        xy = torch.stack((self._wrap(self.cx[which] + r * torch.cos(th)),
+                          self.cy[which] + r * torch.sin(th)), 1)
+        xy = xy[(xy[:, 1] > g.ylo) & (xy[:, 1] < g.yhi)]
+        return xy[self._outside(xy)]
+
+    def face(self, n: int, y: float):
+        g = self.geom
+        return self.torch.stack(
+            (self._u(n, g.xlo, g.xhi),
+             self.torch.full((n,), float(y), device=self.device, dtype=self.dtype)), 1)
+
+    def surfaces(self, n_per: int):
+        torch = self.torch
+        nc = len(self.cx)
+        if nc == 0 or n_per <= 0:
+            return (torch.empty((0, 2), device=self.device, dtype=self.dtype),
+                    torch.empty((0,), device=self.device, dtype=self.dtype))
+        which = torch.arange(nc, device=self.device).repeat_interleave(n_per)
+        th = self._u(nc * n_per, 0.0, 2.0 * math.pi)
+        xy = torch.stack((self._wrap(self.cx[which] + self.cr[which] * torch.cos(th)),
+                          self.cy[which] + self.cr[which] * torch.sin(th)), 1)
+        return xy, self.cv[which]
 
 
 def _weighting_target(cfg: Config) -> tuple[str, int]:

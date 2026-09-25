@@ -21,7 +21,7 @@ import torch
 from . import bias as bias_mod
 from . import config as config_mod
 from .config import Config
-from .geometry import Geometry, Sampler
+from .geometry import Geometry, Sampler, TorchSampler
 from .siren import FieldModel, laplacian, numpy_to_tensor
 
 DTYPES = {"float32": torch.float32, "float64": torch.float64}
@@ -68,7 +68,13 @@ class Trainer:
         self.model = model
         self.device = device
         self.dtype = dtype
-        self.sampler = Sampler(geom, cfg.sampling.seed, cfg.sampling.near_factor)
+        if cfg.sampling.backend == "torch":
+            self.sampler = TorchSampler(geom, cfg.sampling.seed, cfg.sampling.near_factor,
+                                        device=device, dtype=dtype)
+        else:
+            self.sampler = Sampler(geom, cfg.sampling.seed, cfg.sampling.near_factor)
+        if cfg.train.laplacian not in ("explicit", "autograd"):
+            raise ValueError(f"train.laplacian {cfg.train.laplacian!r} unknown")
         self.v_ref = geom.potential_span
         self.l_ref = min(e.lattice.pitch for e in cfg.electrodes)
         self.res_scale = self.l_ref**2 / self.v_ref
@@ -81,11 +87,23 @@ class Trainer:
 
     # -- batches ------------------------------------------------------------
 
-    def _t(self, a: np.ndarray) -> torch.Tensor:
+    def _t(self, a) -> torch.Tensor:
+        if isinstance(a, torch.Tensor):
+            return a.to(device=self.device, dtype=self.dtype)
         return numpy_to_tensor(a, self.device, self.dtype)
 
     def draw(self):
         s, cfg = self.sampler, self.cfg.sampling
+        if isinstance(s, TorchSampler):
+            col = torch.cat((s.bulk(cfg.n_bulk), s.near(cfg.n_near)))
+            faces, face_vals = [], []
+            for key, y in (("ylo", self.geom.ylo), ("yhi", self.geom.yhi)):
+                pts = s.face(cfg.n_face, y)
+                faces.append(pts)
+                face_vals.append(torch.full((len(pts),), float(self._face_targets[key]),
+                                            device=self.device, dtype=self.dtype))
+            surf, surf_vals = s.surfaces(cfg.n_surface)
+            return col, torch.cat(faces), torch.cat(face_vals), surf, surf_vals
         col = np.vstack((s.bulk(cfg.n_bulk), s.near(cfg.n_near)))
         faces, face_vals = [], []
         for key, y in (("ylo", self.geom.ylo), ("yhi", self.geom.yhi)):
@@ -124,7 +142,10 @@ class Trainer:
         col, face_xy, face_v, surf_xy, surf_v = batch
         t = self.cfg.train
 
-        lap = laplacian(self.model.network_part, col)
+        if t.laplacian == "explicit":
+            lap = self.model.network_laplacian(col)
+        else:
+            lap = laplacian(self.model.network_part, col)
         pde = (lap * self.res_scale).pow(2).mean()
 
         face_err = (self.model(face_xy)[:, 0] - face_v) / self.v_ref

@@ -345,6 +345,102 @@ def response_cmd(config_path, sets, drift_path, weight_paths, output, plot_path,
         click.echo(f"wrote {plot_path}")
 
 
+@main.command("learn-response")
+@config_options
+@click.option("-d", "--drift", "drift_path", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Checkpoint of the drift (real-potential) solution.")
+@click.option("-w", "--weight", "weight_paths", multiple=True, required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Weighting checkpoint; repeat once per sensing plane.")
+@click.option("-o", "--output", type=click.Path(dir_okay=False), default="direct.pt",
+              show_default=True)
+@click.option("--steps", type=int, default=None, help="Override direct.steps.")
+@click.option("--device", default=None, help="Override direct.device.")
+def learn_response_cmd(config_path, sets, drift_path, weight_paths, output, steps, device):
+    """Learn the field response directly, from the transport equation.
+
+    Trains a SIREN on the residual of the backward transport equation for the
+    induced charge (technical note Sec. 15.4).  The drift and weighting
+    solutions enter only as its coefficients; no response is a target, so the
+    traced response of `firep response` remains an independent check.
+
+    \b
+      firep learn-response -c examples/drift-2d-pdsp.yaml -d runs/pdsp/drift.pt \\
+          -w runs/pdsp/weight-u.pt -w runs/pdsp/weight-v.pt -w runs/pdsp/weight-w.pt \\
+          -o runs/pdsp/direct.pt
+    """
+    from . import direct as direct_mod
+    from . import response as resp_mod
+
+    cfg = _load(config_path, sets)
+    spec = cfg.direct
+    if steps is not None:
+        spec.steps = steps
+    if device is not None:
+        spec.device = device
+    try:
+        cm = resp_mod.load_combined(drift_path, list(weight_paths), device=spec.device,
+                                    velocity=cfg.response.velocity,
+                                    temperature=cfg.response.temperature,
+                                    mobility=cfg.response.mobility)
+        with perf_mod.step("learn response", "train", steps=spec.steps) as d:
+            model, cell, pool, hist = direct_mod.fit(cm, spec, log=click.echo)
+            d["outputs"] = model.nout
+            d["pool"] = len(pool.xy)
+    except (ValueError, KeyError) as err:
+        raise click.ClickException(str(err)) from err
+    direct_mod.save(output, model, spec, hist, drift_path, list(weight_paths))
+    click.echo(f"wrote {output}")
+
+
+@main.command("direct-response")
+@config_options
+@click.argument("checkpoint", type=click.Path(exists=True, dir_okay=False))
+@click.option("-o", "--output", type=click.Path(dir_okay=False),
+              default="response-direct.npz", show_default=True)
+@click.option("--impacts", type=int, default=None, help="Override response.impacts.")
+@click.option("--tick", type=float, default=None, help="Override response.tick [us].")
+@click.option("--y-start", type=float, default=None,
+              help="Launch height [mm]; default just below the cathode, as `firep response`.")
+@click.option("--device", default=None)
+def direct_response_cmd(config_path, sets, checkpoint, output, impacts, tick, y_start, device):
+    """Evaluate a learned response on the grid `firep response` uses.
+
+    Writes the same `.npz` layout, so `plot-response` and `response-table`
+    work on it unchanged.  `current` is the charge form (the change of the
+    learned charge over each tick); `current_field` is the network's own dQ/dt.
+    """
+    import torch
+
+    from . import direct as direct_mod
+    from . import response as resp_mod
+
+    cfg = _load(config_path, sets)
+    rc = cfg.response
+    blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    dev = device or blob["spec"]["device"]
+    cm = resp_mod.load_combined(blob["drift"], blob["weights"], device=dev,
+                                velocity=rc.velocity, temperature=rc.temperature,
+                                mobility=rc.mobility)
+    model, cell, spec, blob, tdev = direct_mod.load(checkpoint, cm, device=dev)
+    n = impacts if impacts is not None else rc.impacts
+    x0 = np.linspace(0.0, 0.5 * cell.pitch, n)
+    if y_start is None:
+        top = max(e.plane for e in cm.cfg.electrodes)
+        y_start = cm.geom.yhi - 0.01 * (cm.geom.yhi - top)
+    with perf_mod.step("direct response", "response") as d:
+        res = direct_mod.response(model, cm, x0, float(y_start),
+                                  tick if tick is not None else rc.tick, tdev)
+        d["impacts"] = len(x0)
+    resp_mod.save_npz(output, res, cm)
+    iw = int(np.flatnonzero(res.offsets == 0)[0])
+    click.echo("total induced charge on the central wire [e] per plane and impact")
+    for ip, p in enumerate(res.planes):
+        click.echo(f"  {p}  " + " ".join(f"{q:8.4f}" for q in res.integrated[ip, iw]))
+    click.echo(f"wrote {output}")
+
+
 @main.command("plot-response")
 @click.argument("response_file", type=click.Path(exists=True, dir_okay=False))
 @click.option("-o", "--output", type=click.Path(dir_okay=False), default="response.png",

@@ -146,3 +146,21 @@ def test_report_runs():
     cfg = C.from_dict({})
     text = bias.report(cfg, bias.solve(cfg))
     assert "transparency" in text and "FAIL" not in text
+
+
+def test_pdsp_four_planes_explicit():
+    """The PDSP example: four wire planes with explicit biases and a mesh."""
+    import os
+
+    here = os.path.join(os.path.dirname(__file__), "..", "examples")
+    for name in ("drift-2d-pdsp.yaml", "weighting-2d-pdsp.yaml"):
+        cfg = C.load(os.path.join(here, name))
+        assert [e.name for e in cfg.electrodes_by_y] == ["g", "u", "v", "w"]
+    cfg = C.load(os.path.join(here, "drift-2d-pdsp.yaml"))
+    sol = bias.solve(cfg)
+    for e in cfg.electrodes:
+        assert sol.electrodes[e.name] == pytest.approx(float(e.bias))
+    fields = [g.field for g in sol.gaps]
+    assert fields[0] == pytest.approx(503.36, abs=0.01)
+    assert fields[-1] < 0                     # reversed below the collection plane
+    assert all(b > a for a, b in zip(fields[:4], fields[1:4]))

@@ -349,6 +349,11 @@ class Sampling:
     n_surface: int = 256  # boundary points per electrode
     resample_every: int = 1  # steps between redraws; 1 = fresh points every step
     seed: int = 20260918
+    backend: Literal["torch", "numpy"] = "torch"  # torch draws on the training device
+
+    def __post_init__(self):
+        if self.backend not in ("torch", "numpy"):
+            raise ConfigError(f"sampling.backend {self.backend!r} unknown (torch | numpy)")
 
 
 @dataclass
@@ -370,6 +375,9 @@ class Train:
     log_every: int = 200
     device: str = "auto"  # "auto" | "cpu" | "cuda" | "cuda:0" ...
     precision: Literal["float32", "float64"] = "float32"
+    # "explicit": the SIREN Laplacian by forward propagation (exact, faster);
+    # "autograd": nested automatic differentiation, kept as the reference.
+    laplacian: Literal["explicit", "autograd"] = "explicit"
     seed: int = 20260918
 
 
@@ -441,6 +449,54 @@ class ElectronicsCfg:
 
 
 @dataclass
+class DirectCfg:
+    """Learning the field response directly (see :mod:`firep.direct`).
+
+    The induced charge is learned as a field over launch point and time from the
+    residual of the backward transport equation alone; no response is a target.
+    """
+
+    y_top: Any = "auto"  # y_R, mm; auto -> topmost plane + top_pitches pitches
+    top_pitches: float = 1.5  # uniform translation above this (field uniform to ~1e-4)
+    y_bottom: Any = "auto"  # mm; auto -> lowest plane - below
+    below: float = 1.0  # mm
+    duration: float = 20.0  # us learned below y_R
+    tau: float = 0.05  # us, the initial-condition gate 1 - exp(-t/tau)
+    ell: float = 0.3  # mm, conductor gate D = tanh(d / ell)
+    sigma: float = 1.0  # e, network output scale
+    hidden: int = 256
+    layers: int = 4
+    omega0: float = 200.0
+    omega_hidden: float = 30.0
+    final_init_scale: float = 0.1
+    log_features: bool = True  # log-distance to each wire and log-time inputs
+    t_log: float = 0.01  # us, scale of the log-time feature and sampling
+    log_time_fraction: float = 0.25  # of each batch, times drawn log-uniform
+    arrival: bool = True  # learn the arrival time first and give it as an input
+    arrival_steps: int = 60000  # an accurate T matters once arrival_log is on
+    arrival_hidden: int = 128
+    arrival_layers: int = 3
+    arrival_omega0: float = 30.0
+    arrival_log: float = 0.03  # us; > 0 adds ln(1 + relu(T - t)/arrival_log) as an input
+    arrival_time_fraction: float = 0.25  # of each batch, times drawn close to T(r)
+    pool: int = 300000  # collocation points with precomputed coefficients
+    near_fraction: float = 0.5  # of the pool, in log-radial half annuli
+    near_factor: float = 40.0  # annulus outer radius, in wire radii
+    batch: int = 16384
+    steps: int = 60000
+    lr: float = 5e-4
+    lr_final: float = 1e-5
+    causal_bins: int = 32
+    causal_eps: float = 0.02  # 0 disables causal weighting
+    normalise: str = "time"  # residual per unit time ("time") or path length ("path")
+    v_floor: float = 0.25  # |v| floor for "path", in units of v0
+    clip: float = 1.0  # gradient-norm clip; 0 disables
+    log_every: int = 500
+    device: str = "auto"
+    seed: int = 20260924
+
+
+@dataclass
 class Grid:
     """Default evaluation grid for the ``sample`` sub-command."""
 
@@ -463,6 +519,7 @@ class Config:
     response: ResponseCfg = field(default_factory=ResponseCfg)
     ionization: IonizationCfg = field(default_factory=IonizationCfg)
     electronics: ElectronicsCfg = field(default_factory=ElectronicsCfg)
+    direct: DirectCfg = field(default_factory=DirectCfg)
     grid: Grid = field(default_factory=Grid)
 
     def __post_init__(self):
@@ -606,6 +663,7 @@ def default_config_dict() -> dict:
         "response": {},
         "ionization": {},
         "electronics": {},
+        "direct": {},
         "grid": {},
     }
 

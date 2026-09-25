@@ -88,3 +88,29 @@ def test_weighting_index_selects_a_specific_wire():
     )
     hot = [c for c in g.conductors if c.potential != 0.0]
     assert hot[0].electrode == "u" and hot[0].x == pytest.approx(-50.0)
+
+
+def test_torch_sampler_draws_valid_points():
+    """TorchSampler: the same distributions as Sampler, on the device."""
+    import torch
+
+    from firep import bias
+    from firep import config as C
+    from firep.geometry import Geometry, TorchSampler
+
+    cfg = C.from_dict({})
+    geom = Geometry(cfg, bias.solve(cfg))
+    s = TorchSampler(geom, 7, near_factor=20.0, device="cpu", dtype=torch.float64)
+    bulk = s.bulk(4000).numpy()
+    near = s.near(4000).numpy()
+    assert len(bulk) == 4000
+    for pts in (bulk, near):
+        assert (geom.min_gap_distance(pts) >= 1e-3 - 1e-12).all()
+        assert (pts[:, 0] >= geom.xlo).all() and (pts[:, 0] <= geom.xhi).all()
+        assert (pts[:, 1] > geom.ylo).all() and (pts[:, 1] < geom.yhi).all()
+    # near points lie in the log-radial annuli
+    assert (geom.min_gap_distance(near) <= geom.cr.max() * 20.0).all()
+    xy, v = s.surfaces(16)
+    d = geom.min_gap_distance(xy.numpy())
+    assert abs(d).max() < 1e-9
+    assert set(np.round(v.numpy(), 6)) == set(np.round(geom.cv, 6))

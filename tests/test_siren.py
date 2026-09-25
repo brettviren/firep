@@ -171,3 +171,23 @@ def test_wall_correction_stays_harmonic():
         assert float(lap.abs().max()) < 1e-6
     finally:
         torch.set_default_dtype(torch.float32)
+
+
+def test_explicit_laplacian_matches_autograd():
+    """The forward-propagated SIREN Laplacian is the exact derivative."""
+    from firep import config as C
+    from firep import train as T
+    from firep.siren import laplacian
+
+    cfg = C.load_with_overrides(None, ("train.precision=float64", "train.device=cpu"))
+    geom, model, dev, dtype, _ = T.build(cfg)
+    torch.manual_seed(1)
+    with torch.no_grad():  # make the network part non-trivial
+        for p in model.net.parameters():
+            p.add_(0.01 * torch.randn_like(p))
+    xy = torch.rand(300, 2, dtype=dtype) * torch.tensor([5.0, 100.0], dtype=dtype) \
+        + torch.tensor([-2.5, -9.0], dtype=dtype)
+    a = laplacian(model.network_part, xy, create_graph=False)
+    b = model.network_laplacian(xy)
+    assert float((a - b).abs().max()) <= 1e-9 * float(a.abs().max())
+    torch.set_default_dtype(torch.float32)

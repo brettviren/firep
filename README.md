@@ -691,6 +691,171 @@ settings.
 
 ---
 
+## Pixel anodes in 3D
+
+`firep.pixel` solves a plane of pixel pads in three dimensions, and
+`scripts/pixel_pochoir.py` reproduces a colleague's pochoir finite-difference
+field response with it: 4.4 mm pitch, 3.8 mm pads with about 0.4 mm rounded
+corners, and pochoir's boundary conditions as they stand.
+
+```bash
+scripts/pixel_pochoir.py runs/pixel docs/figs   # ~15 min on a GPU the first time; cached after
+```
+
+The analytic part is a **spectral single layer**. Each pad carries surface
+densities with the `1/sqrt(d)` edge singularity, in pad-wide and edge-band
+forms. They are symmetrised over the eight symmetries of the square and summed
+as a double cosine series in x and z. Each transverse mode gets the slab Green's
+function of the face types (drift: zero slope below and the fixed cathode above;
+weighting: grounded below and zero slope above). The cosine series makes the
+sides exact: periodic for the drift cell, pochoir's zero-slope walls for an
+N x N weighting domain. The coefficients are fitted by least squares to the pad
+surfaces, which are two sheets, the pad's top and bottom faces.
+
+Against pochoir (`runs/pixel/*.png`, technical note Sec. 17):
+
+* **Drift.** The uniform field is 50.059 against 50.057 V/mm. The potentials
+  agree to 0.3-0.5 V rms of 7000 V. The 100 paths reach 20 mm above the pads
+  within 2 ns of pochoir's.
+* **Weighting.** The near field agrees (0.9579 against 0.9580 at 0.1 mm above
+  the sensing pad). **pochoir's far field is not converged.** Its zero-slope top
+  and sides require the plane-averaged weighting potential to be constant above
+  the pads (0.0123 for 9 x 9), but its average falls to 2e-3 at 20 mm and 8e-7
+  at 90 mm: 5e6 Jacobi iterations started from zero never filled it in.
+* **Currents.** Over the interior of the sensing pad they agree to 0.12% of
+  the peak. At the gap crossing pochoir's collection pulse is smeared (1.1
+  against 4.8 e/us). Across the pad, 99% of the charge is collected within a
+  0.40 us window here and a 0.95 us window in pochoir. The analytic solution
+  is converged to a few ns under a fourfold change of resolution, so the
+  smearing is the finite-difference discretisation: six voxels across the
+  0.6 mm gap, staircase corners, and velocity zeroed on conductor voxels.
+* **The SIREN correction** (`pixel.train_correction`, on a D4-invariant cosine
+  encoding) leaves the pad-surface residual unchanged, 0.0143 V rms. What the
+  single layer leaves is at the pad edges. For flat pads the analytic part is
+  the solution; the network is there for pads that are not flat.
+
+Problems met on the way, each found by a check:
+* the pad needs two sheets, because its thickness moves the effective plane;
+* an odd term placed on every pad of a class cancels, so it must go on one
+  representative;
+* the charge piles up within a gap width of facing edges, so the basis needs
+  edge bands;
+* the single layer converges only by cancellation on its own sheet, so the fit
+  uses full-grid FFT values there;
+* round-off columns left over from symmetry-removed terms had to be dropped.
+
+### What lies under the pads
+
+`scripts/pixel_gap.py` traces drift lines through one inter-pad gap on the exact
+field, for three treatments of the region under the pads. `PadArray(pcb=r)` puts
+a dielectric of relative permittivity `r` below the pads; `pcb=0` is a charged-up
+insulator, whose surface is zero-slope between pads.
+
+* In pochoir's free space, 7.3% of the drift flux passes below the pad plane and
+  lands on the pads' undersides; lines near the gap midline dive to a stagnation
+  point 2 mm down and take up to ~175 us. That is the model, not the stepper:
+  halving the step moves landings by 0.1 um, while sampling the same field at
+  0.1 mm voxels moves them by ~90 um.
+* A fresh FR4 board catches 11.6% of the electrons; once charged, none, and the
+  drift field no longer depends on the board's permittivity. The weighting field
+  does, and needs the true dielectric.
+
+### Against a newer pochoir solve with a PCB
+
+`scripts/pixel_rado.py` reproduces R. Fan's pochoir store
+(`RADO_STORE`, LArPix-v2a: 3.5 mm pads, 0.7 mm corners, the PCB as a no-flux
+surface in both solves). It agrees on the uniform field (49.934 against 49.936
+V/mm), the near weighting field (1e-3), interior currents (0.03% of the peak) and
+the collection-time dispersion (1.20 against 1.10 us). The difference is the far
+weighting field: pochoir's plane average is not linear in height as Gauss's law
+requires, because the solve's stopping rule (change per sweep < 2e-8) permits
+errors ~0.1 in the slowest mode.
+
+### Pad shape and size
+
+`scripts/pixel_shapes.py` compares the 3.8 mm rounded square with flat disks and
+hemispheres of 3.8, 2.5 and 1.0 mm diameter, over a charged PCB with a 9 x 9 FR4
+weighting domain (about 2 hours on a GPU the first time). Hemispheres use
+`PadShape("hemisphere", R)`: smooth charge sheets inside each dome
+(`pixel.dome_sheets`), fitted on the dome surface (`pixel.dome_nodes`,
+`pixel.fit_design`). The rounded square has the smallest spread of collection
+times (0.08 us rms over the pitch square) and the tallest average pulse. Smaller
+disks sharpen single-launch pulses (up to 9.5 e/us for 1 mm) but spread the
+arrivals (0.61 us rms), because electrons that miss the pad travel over bare
+board. Hemispheres add a spread from their height, ~0.67 us rms for all three.
+
+A pixel of four ganged 1.1 mm dots (`PadShape("quad", 0.55, 1.1)`, every dot on
+one 2.2 mm lattice, gaps equal to the diameter) gives the tallest and narrowest
+average pulse of all (1.47 e/us, 0.25 us FWHM, against 1.29 e/us and 0.35 us for
+the square), at 0.23 us rms spread: the pixel centre, between its own dots, is a
+second stagnation point on the charged board.
+
+A fifth dot at the pixel centre (`PadShape("quint", 0.55, 1.1)`) removes that
+stagnation point but not the spread (0.22 us rms) and lowers the average pulse
+(1.29 e/us); a flat 3.3/1.1 mm ring (`PadShape("annulus", 1.65, 0.55)`, half
+conductor along the axes, gaps equal to the hole) behaves like a pad with a hole
+(0.28 us rms, 1.16 e/us).
+
+### A focusing grid
+
+A grid is one more sheet: `Sheet(y, PadShape("hole", pitch/2, r), "edge",
+tile=True)`, a tile per pad cell outside a round hole, fitted with its own nodes
+and voltage (`pixel.grid_nodes`, per-plane `nodes={plane: (i, j)}`,
+`pixel.fit_rows`); `trace(..., grid=(y, r))` stops paths that land on it. Over
+the 3.5 mm standard pad, a grid 3.2 mm up, 2000 V below the pads, with 1.9 mm
+holes and the drift field held at 500 V/cm above it, is transparent (no launch
+lands on it), makes every launch's pulse alike (1.8-2.0 e/us), screens the
+far-field plateau (0.999 e collected), and lifts the average pulse a little
+(1.27 against 1.17 e/us), but doubles the collection-time spread (0.29 against
+0.14 us rms): electrons over the bars travel sideways above the grid to reach a
+hole. Larger holes help most (0.26 us rms at r = 2.1 mm).
+
+### Optimising the grid design by differentiation
+
+`firep.pixel_opt` rebuilds the pad-plus-grid model so that everything depends
+differentiably on theta = (pad half-width, hole radius, grid height, grid bias).
+Densities are exact scalings about their centres, so their spectra's
+derivatives follow from a scaling identity; the three geometric derivatives of
+the fit are propagated forward and the fit linearised; the drift, induction,
+diffusion smearing and objective are reverse-mode differentiated with
+checkpointing. `scripts/pixel_optimize.py` (needs `pip install -e .[opt]` for
+scipy) minimises the rms duration of the diffusion-smeared average response with
+bounded L-BFGS-B, subject to a grid-to-pad field limit (1000 V/mm assumed):
+
+```bash
+scripts/pixel_optimize.py runs/pixel/opt docs/figs   # ~30 min on one GPU
+```
+
+From the nominal grid (3.5 mm pad, r 1.9 mm, 3.2 mm up, 2000 V) it converges in
+24 evaluations (22 min, 55 s each with the gradient) to a 3.37 mm pad, 1.66 mm
+holes, 2.73 mm up and 2739 V, at the field limit. The gradient agrees with
+finite differences to 2-5%. In the full model (`gridE50opt` in
+`scripts/pixel_shapes.py`) the objective falls 3% (0.502 to 0.485 us), and both
+grid designs beat bare pads (0.77 us) once diffusion is counted, though the
+spread of 99% collection times ranks them the other way.
+
+### The signal induced on neighbours
+
+An electron collected on one pad induces a transient charge on its neighbours
+that returns to zero at collection, and can shift a neighbour's threshold
+crossing or make it trigger. `pixel_opt` measures it as X: the charge on the
+edge (and diagonal) neighbour, averaged over the pitch square and smeared by
+diffusion, peak to peak within 1.5 us of the collection, per electron collected
+(the centre pad's weighting potential along the paths shifted by a pitch, so no
+second trace). `scripts/pixel_optimize.py ... combined` minimises J/J_nom + X/X_nom
+and `... neighbour` X alone. In the full model: bare pads give X = 3.6% (edge) and
+1.8% (diagonal); the nominal grid 1.6%; the combined optimum (3.53 mm pad, 1.44 mm
+holes, grid 1.54 mm up at 1552 V) 0.27% and 0.12%, for J 0.530 against 0.502 us.
+
+### The standard design against the latest pochoir solves
+
+`scripts/pixel_hybrid.py` compares R. Fan's two-grid pochoir solves of the
+standard pad (`RADO_RESULTS`, 5 x 5, 9 x 9 and 17 x 17 weighting domains). The
+currents agree to 0.03% of the peak over the pad and on distant pads, and both
+find 9 x 9 needed and 17 x 17 incremental. The far weighting field is still short
+of Gauss's law, more so for larger domains, and the stitched drift field carries
+an offset of up to 13 V from the coarse grid's pad plane.
+
 ## Ionization, electronics and readout
 
 `firep signal` takes a field response, drifts an ideal ionization track to the
@@ -1013,6 +1178,13 @@ solved models in `runs/` and writes both `docs/figs/*.pdf` and
 quotes**. Nothing in the prose is transcribed by hand, so re-running the
 pipeline updates the text as well as the plots. The source is split into
 `docs/sections/*.tex`, one file per section.
+
+Appendix B (`scripts/effective_plane.py`, CPU, seconds) reduces the 2D model to
+its transverse average: each wire row becomes a charged sheet at the potential
+`V - c Lambda`, for the drift and the weighting problems. It checks that
+picture against the response table, summed over wires and averaged over
+impacts, and tabulates how drift times and plateau charges from tracks parallel
+to the planes respond to changes in the as-built geometry and bias.
 
 Describable, validated and drawable but not yet solvable: 3D domains and the
 `strip`/`hole`/`pad` electrode kinds. Identified but not implemented: image rows

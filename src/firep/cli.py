@@ -330,6 +330,7 @@ def response_cmd(config_path, sets, drift_path, weight_paths, output, plot_path,
                 n_wires=wires if wires is not None else rc.wires,
                 half_pitch=rc.half_pitch,
                 substeps=rc.substeps,
+                impact_nudge=rc.impact_nudge,
             )
             d["impacts"] = len(result.impact)
             d["wires"] = len(result.offsets)

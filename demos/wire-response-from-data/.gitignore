@@ -1,0 +1,8 @@
+runs/
+.mplconfig/
+.snakemake/
+note/*.aux
+note/*.log
+note/*.out
+note/*.toc
+__pycache__/

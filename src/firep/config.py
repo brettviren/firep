@@ -400,6 +400,10 @@ class ResponseCfg:
     max_time: float = 200.0  # us, safety cap on a trajectory
     wires: int | None = None  # wire offsets to report; None -> the weighting lattice
     substeps: int = 4  # integration steps per tick
+    # mm; move an impact at exactly x = 0 off the stagnation line above a wire
+    # that shares its x in every plane (it would otherwise end on the top
+    # plane's wire).  0 keeps the exact grid.
+    impact_nudge: float = 0.0
 
     def __post_init__(self):
         if self.velocity not in ("walkowiak", "constant"):

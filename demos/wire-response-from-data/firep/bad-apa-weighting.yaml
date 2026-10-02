@@ -1,0 +1,42 @@
+# ProtoDUNE-HD bad APA: weighting solves (21 wires), geometry as
+# firep/bad-apa-drift.yaml.  Weighting potentials do not depend on the biases;
+# they are listed only to keep the two configs in step.
+#
+#   firep train -c firep/bad-apa-weighting.yaml --steps 0 \
+#       --set model.final_init_scale=0 --set problem.weighting.electrode=u -o weight-u.pt
+version: 1
+name: pdhd-bad-apa-21wire-weighting
+
+domain:
+  dimension: 2
+  bounds:
+    x: [-49.455, 49.455]   # 21 x 4.71 mm
+    y: [-4.71, 204.71]
+  boundaries:
+    x: {type: periodic}
+    ylo: {type: dirichlet, role: mesh,    potential: 0.0}
+    yhi: {type: dirichlet, role: cathode, potential: -10235.5}
+
+electrodes:
+  - {name: g, kind: wire, role: grid,       plane: 14.13, bias: -665.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 21}}
+  - {name: u, kind: wire, role: induction,  plane: 9.42,  bias: -370.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 21}}
+  - {name: v, kind: wire, role: collection, plane: 4.71,  bias: 0.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 21}}
+  - {name: w, kind: wire, role: induction,  plane: 0.0,   bias: 0.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 21}}
+
+bias:
+  mode: explicit
+
+problem:
+  kind: weighting
+  weighting: {electrode: w, index: null, unit: 1.0}
+
+sampling:
+  n_bulk: 8192
+  n_near: 8192
+  n_surface: 128
+
+grid: {nx: 841, ny: 841}

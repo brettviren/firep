@@ -18,3 +18,5 @@ docs/*.log
 docs/*.out
 docs/*.toc
 docs/*.pdf
+.mplconfig/
+*.csv

@@ -1,0 +1,887 @@
+# Recipes for the wire-response-from-data demo (ProtoDUNE-HD).  See design.md.
+#
+#     snakemake -c4 -n            # what would run
+#     snakemake -c4 note          # everything the note needs, then the PDF
+#     snakemake -c1 laser_coverage
+#
+# Every rule sources env.sh.  Rules marked SKELETON fail with a message until
+# their step in design.md is implemented.
+#
+# Hidden-truth discipline: config["bad_fr"] is the truth.  It is read by the
+# `data` rule (making the pseudo-data) and by scoring rules (`fr_good_bad`,
+# `score`).  Nothing a fit consumes may depend on those rules except through
+# the data frames.
+
+import json
+import os
+import re
+
+configfile: "config.yaml"
+
+wildcard_constraints:
+    plane="[uvw]",
+    mesh=r"\d+(\.\d+)?",
+
+os.environ.setdefault("XEROSERE_TOP", os.path.expanduser("~/dune/xerosere"))
+X = lambda s: os.path.expandvars(os.path.expanduser(str(s)))
+
+R = config["rundir"]
+FIGS = "note/figs"
+GOOD = X(config["good_fr"])
+BAD = X(config["bad_fr"])
+UNTUNED = X(config["bad_untuned_fr"])
+WIRES = X(config["wires"])
+LASER = config["laser"]
+A, C = config["anode"], config["control_anode"]
+ENV = "source env.sh"
+PY = "$DEMO_PYTHON"
+csv3 = lambda v: ",".join(str(x) for x in v)
+
+
+def skeleton(step):
+    return f"echo 'SKELETON: implement design.md step {step}' >&2; exit 1"
+
+
+rule note:
+    input:
+        f"{FIGS}/apa-numbering.pdf",
+        f"{FIGS}/setup.tex",
+        f"{FIGS}/fr-frgb.tex",
+        f"{FIGS}/laser-coverage.tex",
+        f"{FIGS}/firep-landing.tex",
+        f"{FIGS}/fr-frbone.tex",
+        f"{FIGS}/frames-data.tex",
+        f"{FIGS}/scan-scbone.tex",
+        f"{FIGS}/scan-scbtwo.tex",
+        f"{FIGS}/scan-scbtwobin.tex",
+        f"{FIGS}/scan-scmesh.tex",
+        f"{FIGS}/paths-truth.tex",
+        f"{FIGS}/proj-prtruth.tex",
+        f"{FIGS}/proj-pruntuned.tex",
+        f"{FIGS}/scan-scbzero.tex",
+        f"{FIGS}/scan-scbzerobin.tex",
+        f"{FIGS}/scan-scbproj.tex",
+        f"{FIGS}/l2-lbone.tex",
+        f"{FIGS}/l2-lbproj.tex",
+        f"{FIGS}/l2-lbtwo.tex",
+        f"{FIGS}/l2-lbprojbal.tex",
+        f"{FIGS}/l2-lbtwobal.tex",
+        f"{FIGS}/paths-l2.tex",
+        expand(f"{FIGS}/scan-{{tag}}.tex",
+               tag=["hotwo", "hotwobal", "hotwoprior", "hoproj", "hoprojprior"]),
+    output:
+        "note/wrfd.pdf",
+    shell:
+        "make -C note pdf"
+
+
+rule check_env:
+    output:
+        f"{R}/env.txt",
+    shell:
+        "{ENV}; bash scripts/check-env.sh > {output}"
+
+
+# Sec. 2: run settings as macros.
+rule setup_macros:
+    input:
+        cfg="config.yaml",
+        vfloat=f"{R}/firep/vfloat.txt",
+        script="scripts/setup_macros.py",
+    output:
+        f"{FIGS}/setup.tex",
+    shell:
+        "{ENV}; {PY} {input.script} {input.cfg} {input.vfloat} {output}"
+
+
+# Sec. 3: WCT anode vs online APA numbering.
+rule apa_numbering:
+    input:
+        wires=WIRES,
+        script="scripts/numbering_fig.py",
+    output:
+        f"{FIGS}/apa-numbering.pdf",
+    shell:
+        "{ENV}; {PY} {input.script} {input.wires} {output}"
+
+
+# S1 (scoring side): good vs bad Garfield -- why approach A is ruled out.
+rule fr_good_bad:
+    input:
+        good=GOOD,
+        bad=BAD,
+        script="scripts/fr_compare.py",
+    output:
+        f"{FIGS}/fr-frgb.tex",
+        f"{FIGS}/fr-frgb.pdf",
+    shell:
+        "{ENV}; {PY} {input.script} {input.good} {input.bad} {FIGS}"
+        " --tag frgb --labels 'G-nom,G-bad-T'"
+
+
+# S2: what the recorded laser shots cover, as recorded and shifted.
+rule laser_coverage:
+    input:
+        csv=LASER["csv"],
+        wires=WIRES,
+        script="scripts/laser_coverage.py",
+    output:
+        f"{FIGS}/laser-coverage.tex",
+        f"{FIGS}/laser-coverage.pdf",
+    params:
+        shift=csv3(LASER["shift_mm"]),
+        flip=csv3(LASER["flip"]),
+    shell:
+        "{ENV}; {PY} {input.script} {input.wires} {FIGS} {input.csv}"
+        " --anode {A} --control {C} --shift={params.shift} --flip={params.flip}"
+
+
+rule anode_box:
+    input:
+        wires=WIRES,
+        script="scripts/wires.py",
+    output:
+        f"{R}/geom/anode{{anode}}-box.txt",
+    shell:
+        "{ENV}; {PY} {input.script} {input.wires} {wildcards.anode}"
+        " --cathode-x {config[cathode_x_mm]} > {output}"
+
+
+# S2: laser shots -> depos.  The box spans the target anode and the control
+# (they are adjacent in z) so each track is kept on both.
+rule laser_depos:
+    input:
+        csv=LASER["csv"],
+        box_t=f"{R}/geom/anode{A}-box.txt",
+        box_c=f"{R}/geom/anode{C}-box.txt",
+        script="scripts/laser_depos.py",
+    output:
+        depos=f"{R}/depos/laser.npz",
+        tracks=f"{R}/depos/laser-tracks.npz",
+        summary=f"{R}/depos/laser.json",
+    params:
+        shift=csv3(LASER["shift_mm"]),
+        flip=csv3(LASER["flip"]),
+    shell:
+        "{ENV}; box=$({PY} -c \"import numpy as n;"
+        " a=n.loadtxt('{input.box_t}',delimiter=',');b=n.loadtxt('{input.box_c}',delimiter=',');"
+        " print(','.join(f'{{v:.2f}}' for v in [*n.minimum(a[:3],b[:3]),*n.maximum(a[3:],b[3:])]))\");"
+        " {PY} {input.script} {output.depos} {input.csv} --box=$box --shift={params.shift} --flip={params.flip}"
+        " --stride {LASER[stride]} --per-event {LASER[per_event]}"
+        " --step {LASER[step_mm]} --dqdx {LASER[dqdx_per_mm]} --index {LASER[index]}"
+        " --tracks {output.tracks} --summary {output.summary}"
+
+
+# S3: WCT simulation, anode 0 with a given field response, others nominal.
+def sim_shell(fr, anodes=None):
+    S = config["sim"]
+    anodes = anodes or [A, C]
+    return (ENV + "; wire-cell -l {log} -L info"
+            f" -V elecGain={S['gain_mV_fC']}"
+            " -A depos={input.depos} -A frames={output}"
+            f" -A fr_bad={fr} -A fr_good={GOOD}"
+            f" -A anodes='{json.dumps(anodes, separators=(",", ":"))}'"
+            f" -A noise={str(S['noise']).lower()}"
+            f" -A fluctuate={str(S['fluctuate']).lower()}"
+            f" -A seeds='{json.dumps(S['seeds'])}'"
+            " -c cfg/sim-laser.jsonnet")
+
+
+# The pseudo-data.  Reads the hidden truth.
+rule data:
+    input:
+        depos=rules.laser_depos.output.depos,
+    output:
+        f"{R}/frames/data.npz",
+    log:
+        f"{R}/logs/data.log",
+    shell:
+        sim_shell(BAD)
+
+
+# S4: firep models of the bad-APA cell (firep/bad-apa-*.yaml).  The drift
+# solves use the analytic basis alone: exactly harmonic, seconds on a CPU.
+FDRIFT = "firep/bad-apa-drift.yaml"
+FWEIGHT = "firep/bad-apa-weighting.yaml"
+FR_ = f"{R}/firep"
+FSET = "--steps 0 --set model.final_init_scale=0"
+
+
+rule firep_landing:
+    input:
+        cfg=FDRIFT,
+        script="scripts/firep_landing.py",
+    output:
+        f"{FIGS}/firep-landing.tex",
+        f"{FIGS}/firep-landing.pdf",
+    params:
+        out=f"{FR_}/landing",
+    shell:
+        "{ENV}; {PY} {input.script} {input.cfg} {params.out}"
+        " --vw=0,-10,-20,-30,-40,-43,-44,-45,-46,-47,-50,-60,-80,-100,-120,-140,-160,-200"
+        " && cp {params.out}/firep-landing.tex {params.out}/firep-landing.pdf {FIGS}/"
+
+
+# The floating-equilibrium W potential: least negative V_W with no W landing.
+VFLOAT_SCAN = "--bisect=-20,-300,0.5 --n 4710"
+
+
+def vfloat_shell(extra=""):
+    return ("{ENV}; {PY} {input.script} {input.cfg} {params.out} " + VFLOAT_SCAN + extra +
+            " && {PY} -c \"import json; d=json.load(open('{params.out}/firep-landing.json'));"
+            " print(d[-1]['vfloat_estimate'])\" > {output}")
+
+
+rule firep_vfloat:
+    input:
+        cfg=FDRIFT,
+        script="scripts/firep_landing.py",
+    output:
+        f"{FR_}/vfloat.txt",
+    params:
+        out=f"{FR_}/landing-eq",
+    shell:
+        vfloat_shell()
+
+
+# The same with the mesh at y = -<mesh> mm.
+rule firep_vfloat_mesh:
+    input:
+        cfg=FDRIFT,
+        script="scripts/firep_landing.py",
+    output:
+        f"{FR_}/vfloat-m{{mesh}}.txt",
+    params:
+        out=f"{FR_}/landing-eq-m{{mesh}}",
+    shell:
+        vfloat_shell(" --set 'domain.bounds.y=[-{wildcards.mesh},204.71]'")
+
+
+rule firep_weight:
+    input:
+        FWEIGHT,
+    output:
+        f"{FR_}/resp/weight-{{plane}}.pt",
+    shell:
+        "{ENV}; $DEMO_FIREP train -c {input} {FSET}"
+        " --set problem.weighting.electrode={wildcards.plane} -o {output} -q"
+
+
+rule firep_weight_mesh:
+    input:
+        FWEIGHT,
+    output:
+        f"{FR_}/resp/weight-{{plane}}-m{{mesh}}.pt",
+    shell:
+        "{ENV}; $DEMO_FIREP train -c {input} {FSET}"
+        " --set problem.weighting.electrode={wildcards.plane}"
+        " --set 'domain.bounds.y=[-{wildcards.mesh},204.71]' -o {output} -q"
+
+
+# Prior names: BASE[m<mesh>][b], BASE a config["priors"] key or vw<V_W>;
+# m<mesh> puts the mesh at y = -<mesh> mm (default config bad_apa.mesh_y_mm);
+# b bin-averages a 51-impact response onto the six paths.
+PRIOR_RE = re.compile(r"(?P<base>.+?)(?:m(?P<mesh>\d+(?:\.\d+)?))?(?P<b>b)?")
+
+
+def prior_parse(name):
+    m = PRIOR_RE.fullmatch(name)
+    base, mesh, binavg = m.group("base"), m.group("mesh"), bool(m.group("b"))
+    if base in config["priors"]:
+        vw = config["priors"][base]["w_potential_V"]
+    else:
+        v = re.fullmatch(r"vw(-?\d+(?:\.\d+)?)", base)
+        if not v:
+            raise ValueError(f"unknown prior {name}")
+        vw = float(v.group(1))
+    return dict(vw=vw, mesh=mesh, binavg=binavg)
+
+
+def vfloat_file(p):
+    return f"{FR_}/vfloat.txt" if p["mesh"] is None else f"{FR_}/vfloat-m{p['mesh']}.txt"
+
+
+def prior_vw_value(name):
+    return prior_parse(name)["vw"]
+
+
+def mesh_set(p):
+    return "" if p["mesh"] is None else f" --set 'domain.bounds.y=[-{p['mesh']},204.71]'"
+
+
+rule firep_drift:
+    input:
+        cfg=FDRIFT,
+        vfloat=lambda w: [vfloat_file(prior_parse(w.name))]
+            if prior_vw_value(w.name) == "float" else [],
+    output:
+        f"{FR_}/drift-{{name}}.pt",
+    params:
+        vw=lambda w: (f"$(cat {vfloat_file(prior_parse(w.name))})"
+                      if prior_vw_value(w.name) == "float" else str(prior_vw_value(w.name))),
+        mesh=lambda w: mesh_set(prior_parse(w.name)),
+    shell:
+        "{ENV}; $DEMO_FIREP train -c {input.cfg} {FSET}"
+        " --set electrodes.3.bias={params.vw}{params.mesh} -o {output} -q"
+
+
+def weight_files(name):
+    p = prior_parse(name)
+    suf = "" if p["mesh"] is None else f"-m{p['mesh']}"
+    return [f"{FR_}/resp/weight-{pl}{suf}.pt" for pl in "uvw"]
+
+
+rule firep_response:
+    input:
+        cfg=FDRIFT,
+        drift=f"{FR_}/drift-{{name}}.pt",
+        weights=lambda w: weight_files(w.name),
+    output:
+        f"{FR_}/resp/response-{{name}}.npz",
+    log:
+        f"{FR_}/resp/response-{{name}}.log",
+    params:
+        w=lambda w, input: " ".join(f"-w {p}" for p in input.weights),
+        imp=lambda w: " --impacts 51" if prior_parse(w.name)["binavg"] else "",
+        mesh=lambda w: mesh_set(prior_parse(w.name)),
+    shell:
+        "{ENV}; $DEMO_FIREP response -c {input.cfg} -d {input.drift} {params.w}"
+        " --y-start 100 --set response.impact_nudge=0.025{params.imp}{params.mesh}"
+        " -o {output} > {log} 2>&1"
+
+
+rule prior:
+    wildcard_constraints:
+        name="vw[^/]*",
+    input:
+        cfg=FDRIFT,
+        resp=f"{FR_}/resp/response-{{name}}.npz",
+        script="scripts/firep_to_wct.py",
+    output:
+        f"{R}/prior/{{name}}.json.bz2",
+    params:
+        b=lambda w: " --bin-average" if prior_parse(w.name)["binavg"] else "",
+    shell:
+        "{ENV}; {PY} {input.script} {input.cfg} {input.resp} {output}{params.b}"
+
+
+# B1 pair: firep at V_W = 0 vs at the floating equilibrium.
+rule fr_bone:
+    input:
+        a=f"{R}/prior/vw0.json.bz2",
+        b=f"{R}/prior/vwfloat.json.bz2",
+        script="scripts/fr_compare.py",
+    output:
+        f"{FIGS}/fr-frbone.tex",
+        f"{FIGS}/fr-frbone.pdf",
+    shell:
+        "{ENV}; {PY} {input.script} {input.a} {input.b} {FIGS} --tag frbone"
+        " --labels 'P(0),P(float)'"
+
+
+rule sim_prior:
+    input:
+        depos=rules.laser_depos.output.depos,
+        fr=f"{R}/prior/{{name}}.json.bz2",
+    output:
+        f"{R}/frames/prior-{{name}}.npz",
+    log:
+        f"{R}/logs/sim_prior-{{name}}.log",
+    shell:
+        sim_shell("{input.fr}")
+
+
+# S3: one shot of the pseudo-data against the B1 priors, as the fit sees them.
+rule frames_data:
+    input:
+        data=rules.data.output,
+        vw0=f"{R}/frames/prior-vw0.npz",
+        vwfloat=f"{R}/frames/prior-vwfloat.npz",
+        script="scripts/frame_view.py",
+    output:
+        pdf=f"{FIGS}/frames-data.pdf",
+        tex=f"{FIGS}/frames-data.tex",
+    shell:
+        "{ENV}; {PY} {input.script} {output.pdf} {input.data}:'ADC[G-bad-T]'"
+        " {input.vw0}:'ADC[P(0)]' {input.vwfloat}:'ADC[P(float)]'"
+        " --anodes {A},{C} --tex {output.tex} --tag fv"
+
+
+# S6: the fit sample and WCT-in-the-loop scans.  The simulation is linear in
+# the field response and learner 1 has few parameters, so WCT itself serves as
+# the (exact) forward model: each trial is a firep solve plus a WCT run on the
+# fit subset of shots, anode 0 only.
+FIT = config["fit"]
+
+
+rule depos_fit:
+    input:
+        depos=rules.laser_depos.output.depos,
+        script="scripts/subset.py",
+    output:
+        f"{R}/depos/fit.npz",
+    shell:
+        "{ENV}; {PY} {input.script} depos {input.depos} {output} --stride {FIT[stride]}"
+
+
+# The same shots cut from the full pseudo-data (does not read the truth).
+rule data_fit:
+    input:
+        frames=rules.data.output,
+        script="scripts/subset.py",
+    output:
+        f"{R}/frames/fit/data.npz",
+    shell:
+        "{ENV}; {PY} {input.script} frames {input.frames} {output} --stride {FIT[stride]}"
+
+
+rule sim_fit:
+    input:
+        depos=rules.depos_fit.output,
+        fr=f"{R}/prior/{{name}}.json.bz2",
+    output:
+        f"{R}/frames/fit/{{name}}.npz",
+    log:
+        f"{R}/logs/sim_fit-{{name}}.log",
+    shell:
+        sim_shell("{input.fr}", anodes=[A])
+
+
+def fit_frames(name):
+    return f"{R}/frames/fit/{name}.npz"
+
+
+VW_MODELS = {v: fit_frames(f"vw{v:g}") for v in FIT["vw_scan"]}
+VWB_MODELS = {v: fit_frames(f"vw{v:g}b") for v in FIT["vw_scan"]}
+MESH_MODELS = {m: fit_frames(f"vwfloatm{m:g}b") for m in FIT["mesh_scan"]}
+
+
+def scan_shell(tag, models, param="$V_W$ [V]", true=None):
+    spec = " ".join(f"{v:g}={p}" for v, p in models.items())
+    t = f" --true {true}" if true is not None else ""
+    return ("{ENV}; {PY} {input.script} {input.ref} {FIGS}"
+            f" --tag {tag} --anode {A} --noise {FIT['noise_adc']}"
+            f" --tmax {FIT['tmax_ticks']} --param '{param}'{t} -- " + spec + " > {log}")
+
+
+# B1: pseudo-data from firep at the floating equilibrium; scan V_W.
+rule scan_bone:
+    input:
+        ref=fit_frames("vwfloat"),
+        vfloat=f"{FR_}/vfloat.txt",
+        models=list(VW_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scbone.tex",
+        f"{FIGS}/scan-scbone.pdf",
+    log:
+        f"{R}/logs/scan-scbone.txt",
+    shell:
+        scan_shell("scbone", VW_MODELS, true="$(cat {input.vfloat})")
+
+
+# B2 with learner 1: the Garfield-tuned pseudo-data; scan V_W (t0 profiled).
+rule scan_btwo:
+    input:
+        ref=rules.data_fit.output,
+        models=list(VW_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scbtwo.tex",
+        f"{FIGS}/scan-scbtwo.pdf",
+    log:
+        f"{R}/logs/scan-scbtwo.txt",
+    shell:
+        scan_shell("scbtwo", VW_MODELS)
+
+
+# As scan_btwo with bin-averaged six-path tables.
+rule scan_btwobin:
+    input:
+        ref=rules.data_fit.output,
+        models=list(VWB_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scbtwobin.tex",
+        f"{FIGS}/scan-scbtwobin.pdf",
+    log:
+        f"{R}/logs/scan-scbtwobin.txt",
+    shell:
+        scan_shell("scbtwobin", VWB_MODELS)
+
+
+# Mesh depth, W at its floating equilibrium for each, bin-averaged tables.
+rule scan_mesh:
+    input:
+        ref=rules.data_fit.output,
+        models=list(MESH_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scmesh.tex",
+        f"{FIGS}/scan-scmesh.pdf",
+    log:
+        f"{R}/logs/scan-scmesh.txt",
+    shell:
+        scan_shell("scmesh", MESH_MODELS, param="mesh depth below W [mm]")
+
+
+# The untuned Garfield bad-APA response, usable wherever a prior is.
+rule garfield_untuned:
+    input:
+        UNTUNED,
+    output:
+        f"{R}/prior/garfield-untuned.json.bz2",
+    shell:
+        "cp {input} {output}"
+
+
+# Physical projections: fit each impact bin as a non-negative composition of
+# firep paths shared by all planes and wires (scripts/project_truth.py).
+# shift only (stretch fixed at 1): learner 2 has no stretch, so B2' stays representable
+PROJ_GRID = "--shift 3.0,4.6,0.05 --stretch 1.0,1.0,0.01 --shaping 2.2"
+
+
+# Hidden side: the tuned truth projected onto firep at the floating
+# equilibrium.  Its frames are pseudo-data (B2'), never a prior.
+rule proj_truth:
+    input:
+        target=BAD,
+        basis=f"{FR_}/resp/response-vwfloatm4.71b.npz",
+        script="scripts/project_truth.py",
+        helper="scripts/firep_to_wct.py",
+    output:
+        fr=f"{R}/truth/proj-vwfloat.json.bz2",
+        tex=f"{FIGS}/proj-prtruth.tex",
+        pdf=f"{FIGS}/proj-prtruth.pdf",
+    shell:
+        "{ENV}; {PY} {input.script} {input.target} {input.basis} {output.fr} {FIGS}"
+        " --tag prtruth " + PROJ_GRID
+
+
+# Prior side: the untuned Garfield file projected onto firep at V_W = 0.
+rule proj_untuned:
+    input:
+        target=UNTUNED,
+        basis=f"{FR_}/resp/response-vw0b.npz",
+        script="scripts/project_truth.py",
+        helper="scripts/firep_to_wct.py",
+    output:
+        fr=f"{FR_}/proj-untuned.json.bz2",
+        tex=f"{FIGS}/proj-pruntuned.tex",
+        pdf=f"{FIGS}/proj-pruntuned.pdf",
+    shell:
+        "{ENV}; {PY} {input.script} {input.target} {input.basis} {output.fr} {FIGS}"
+        " --tag pruntuned " + PROJ_GRID
+
+
+# B2' pseudo-data on the fit sample: the projected truth.
+rule data_proj:
+    input:
+        depos=rules.depos_fit.output,
+        fr=rules.proj_truth.output.fr,
+    output:
+        f"{R}/frames/fit/data-proj.npz",
+    log:
+        f"{R}/logs/data_proj.log",
+    shell:
+        sim_shell("{input.fr}", anodes=[A])
+
+
+# B0: which firep V_W best matches the untuned Garfield file?
+rule scan_bzero:
+    input:
+        ref=fit_frames("garfield-untuned"),
+        models=list(VW_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scbzero.tex",
+        f"{FIGS}/scan-scbzero.pdf",
+    log:
+        f"{R}/logs/scan-scbzero.txt",
+    shell:
+        scan_shell("scbzero", VW_MODELS)
+
+
+rule scan_bzerobin:
+    input:
+        ref=fit_frames("garfield-untuned"),
+        models=list(VWB_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scbzerobin.tex",
+        f"{FIGS}/scan-scbzerobin.pdf",
+    log:
+        f"{R}/logs/scan-scbzerobin.txt",
+    shell:
+        scan_shell("scbzerobin", VWB_MODELS)
+
+
+# B2': learner 1 (bin-averaged) against the projected truth.
+rule scan_bproj:
+    input:
+        ref=rules.data_proj.output,
+        models=list(VWB_MODELS.values()),
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-scbproj.tex",
+        f"{FIGS}/scan-scbproj.pdf",
+    log:
+        f"{R}/logs/scan-scbproj.txt",
+    shell:
+        scan_shell("scbproj", VWB_MODELS)
+
+
+# Scoring side: truth vs the firep floating-W prior vs V_W = 0, path by path.
+rule paths_truth:
+    input:
+        truth=BAD,
+        fl=f"{R}/prior/vwfloatm4.71b.json.bz2",
+        z=f"{R}/prior/vw0b.json.bz2",
+        script="scripts/path_compare.py",
+    output:
+        pdf=f"{FIGS}/paths-truth.pdf",
+        tex=f"{FIGS}/paths-truth.tex",
+    shell:
+        "{ENV}; {PY} {input.script} {output.pdf} --tex {output.tex} --tag pt"
+        " {input.truth}:'G-bad-T' {input.fl}:'P$_b$(float)':3.6"
+        " {input.z}:'P$_b$(0)':3.6"
+
+
+# S6, learner 2: composition weights w_k(d) >= 0 per impact bin, shared by all
+# planes and wires, fitted to ADC.  WCT is linear in the field response, so the
+# model is sum_c w_c S_c with S_c the analog WCT simulation of one component
+# response (scripts/component_fr.py); fitted by NNLS (scripts/learner2.py).
+L2 = config["l2"]
+L2R = f"{R}/l2"
+# components are named by offset in hundredths of a pitch: c<bin>_<d*100>
+L2COLS = [(int(k), int(round(100 * float(d))), float(d)) for k, ds in L2["offsets"].items()
+          for d in ds]
+
+
+rule l2_windows:
+    input:
+        ref=fit_frames("vwfloat"),
+        script="scripts/l2_crop.py",
+    output:
+        f"{L2R}/windows.npz",
+    shell:
+        "{ENV}; {PY} {input.script} windows {input.ref} {output} --anode {A}"
+
+
+def l2_offset(w):
+    return int(w.j) / 100.0
+
+
+rule l2_component_fr:
+    input:
+        fine=f"{FR_}/resp/response-{L2['basis']}.npz",
+        cfg=FDRIFT,
+        script="scripts/component_fr.py",
+        helper="scripts/firep_to_wct.py",
+    output:
+        f"{L2R}/fr/c{{k}}_{{j}}.json.bz2",
+    params:
+        d=l2_offset,
+    shell:
+        "{ENV}; {PY} {input.script} {input.fine} {output} --config {input.cfg}"
+        " --bin {wildcards.k} --offset={params.d}"
+
+
+rule l2_column:
+    input:
+        depos=rules.depos_fit.output,
+        fr=f"{L2R}/fr/c{{k}}_{{j}}.json.bz2",
+        windows=rules.l2_windows.output,
+        script="scripts/l2_crop.py",
+    output:
+        f"{L2R}/col/c{{k}}_{{j}}.npz",
+    log:
+        f"{R}/logs/l2_column-c{{k}}_{{j}}.log",
+    params:
+        tmp=f"{L2R}/tmp/c{{k}}_{{j}}.npz",
+    shell:
+        "{ENV}; mkdir -p {L2R}/tmp; wire-cell -l {log} -L info"
+        " -V elecGain={config[sim][gain_mV_fC]}"
+        " -A depos={input.depos} -A frames={params.tmp}"
+        " -A fr_bad={input.fr} -A fr_good={GOOD} -A anodes='[{A}]'"
+        " -A digitize=false -c cfg/sim-laser.jsonnet"
+        " && {PY} {input.script} crop {params.tmp} {input.windows} {output}"
+        " --anode {A} --scale {L2[adc_per_unit]}"
+        " && rm -f {params.tmp}"
+
+
+rule l2_columns_json:
+    input:
+        [f"{L2R}/col/c{k}_{j}.npz" for k, j, _ in L2COLS],
+    output:
+        f"{L2R}/columns.json",
+    run:
+        json.dump([{"bin": k, "offset": d, "path": f"{L2R}/col/c{k}_{j}.npz"}
+                   for k, j, d in L2COLS], open(output[0], "w"), indent=1)
+
+
+L2REFS = {"lbone": fit_frames("vwfloat"), "lbproj": f"{R}/frames/fit/data-proj.npz",
+          "lbtwo": f"{R}/frames/fit/data.npz"}
+# plane-balanced variants (tag ending in "bal")
+L2REFS.update({t + "bal": p for t, p in list(L2REFS.items())})
+
+
+rule l2_fit:
+    input:
+        data=lambda w: L2REFS[w.tag],
+        windows=rules.l2_windows.output,
+        cols=rules.l2_columns_json.output,
+        script="scripts/learner2.py",
+    output:
+        tex=f"{FIGS}/l2-{{tag}}.tex",
+        pdf=f"{FIGS}/l2-{{tag}}.pdf",
+        weights=f"{L2R}/weights-{{tag}}.json",
+    log:
+        f"{R}/logs/l2-{{tag}}.txt",
+    params:
+        shift=lambda w: ",".join(str(x) for x in L2["shift_ticks"][w.tag.removesuffix("bal")]),
+        bal=lambda w: " --balance" if w.tag.endswith("bal") else "",
+    shell:
+        "{ENV}; {PY} {input.script} {input.data} {input.windows} {FIGS}"
+        " --tag {wildcards.tag} --columns {input.cols} --shift={params.shift}"
+        " --noise {FIT[noise_adc]} --anode {A} --weights-out {output.weights}{params.bal} > {log}"
+
+
+# The learned response as a WCT file, for scoring and re-simulation.
+rule l2_learned_fr:
+    input:
+        fine=f"{FR_}/resp/response-{L2['basis']}.npz",
+        weights=f"{L2R}/weights-{{tag}}.json",
+        cfg=FDRIFT,
+        script="scripts/component_fr.py",
+        helper="scripts/firep_to_wct.py",
+    output:
+        f"{L2R}/learned-{{tag}}.json.bz2",
+    shell:
+        "{ENV}; {PY} {input.script} {input.fine} {output} --config {input.cfg}"
+        " --weights {input.weights}"
+
+
+# Scoring side: truth vs what learner 2 learned from its ADC, path by path.
+rule paths_l2:
+    input:
+        truth=BAD,
+        learned=f"{L2R}/learned-lbtwo.json.bz2",
+        prior=f"{R}/prior/{L2['basis']}.json.bz2",
+        script="scripts/path_compare.py",
+    output:
+        pdf=f"{FIGS}/paths-l2.pdf",
+        tex=f"{FIGS}/paths-l2.tex",
+    shell:
+        "{ENV}; {PY} {input.script} {output.pdf} --tex {output.tex} --tag pl"
+        " {input.truth}:'G-bad-T' {input.learned}:'L2[G-bad-T]':3.75"
+        " {input.prior}:'P$_b$(float)':3.75"
+
+
+# Held-out prediction (App. A's third criterion): a disjoint set of shots,
+# simulated with each learned response and compared with held-out data.
+HOLD = f"{R}/frames/hold"
+
+
+rule depos_hold:
+    input:
+        depos=rules.laser_depos.output.depos,
+        script="scripts/subset.py",
+    output:
+        f"{R}/depos/hold.npz",
+    shell:
+        "{ENV}; {PY} {input.script} depos {input.depos} {output}"
+        " --stride {FIT[stride]} --first {FIT[holdout_first]}"
+
+
+rule data_hold:
+    input:
+        frames=rules.data.output,
+        script="scripts/subset.py",
+    output:
+        f"{HOLD}/data.npz",
+    shell:
+        "{ENV}; {PY} {input.script} frames {input.frames} {output}"
+        " --stride {FIT[stride]} --first {FIT[holdout_first]}"
+
+
+HOLD_FR = {"data-proj": f"{R}/truth/proj-vwfloat.json.bz2",        # B2' truth (hidden)
+           "learned-lbtwo": f"{L2R}/learned-lbtwo.json.bz2",
+           "learned-lbproj": f"{L2R}/learned-lbproj.json.bz2",
+           "learned-lbtwobal": f"{L2R}/learned-lbtwobal.json.bz2",
+           "prior": f"{R}/prior/{L2['basis']}.json.bz2"}
+
+
+rule sim_hold:
+    wildcard_constraints:
+        name="|".join(re.escape(k) for k in ["data-proj", "learned-lbtwo", "learned-lbproj",
+                                             "learned-lbtwobal", "prior"]),
+    input:
+        depos=rules.depos_hold.output,
+        fr=lambda w: HOLD_FR[w.name],
+    output:
+        f"{HOLD}/{{name}}.npz",
+    log:
+        f"{R}/logs/sim_hold-{{name}}.log",
+    shell:
+        sim_shell("{input.fr}", anodes=[A])
+
+
+# tag: (reference, model)
+HOLD_TESTS = {"hotwo": ("data", "learned-lbtwo"), "hotwobal": ("data", "learned-lbtwobal"),
+              "hotwoprior": ("data", "prior"),
+              "hoproj": ("data-proj", "learned-lbproj"), "hoprojprior": ("data-proj", "prior")}
+
+
+rule hold_test:
+    input:
+        ref=lambda w: f"{HOLD}/{HOLD_TESTS[w.tag][0]}.npz",
+        model=lambda w: f"{HOLD}/{HOLD_TESTS[w.tag][1]}.npz",
+        script="scripts/scan_loss.py",
+    output:
+        f"{FIGS}/scan-{{tag}}.tex",
+        f"{FIGS}/scan-{{tag}}.pdf",
+    wildcard_constraints:
+        tag="ho[a-z]+",
+    log:
+        f"{R}/logs/scan-{{tag}}.txt",
+    shell:
+        "{ENV}; {PY} {input.script} {input.ref} {FIGS} --tag {wildcards.tag} --anode {A}"
+        " --noise {FIT[noise_adc]} --tmax {FIT[tmax_ticks]} --param model -- 0={input.model}"
+        " > {log}"
+
+
+# S5: differentiable forward model vs WCT (Garfield good FR on the control).
+rule forward_closure:
+    input:
+        depos=rules.laser_depos.output.depos,
+        frames=f"{R}/frames/prior-bc-exact.npz",
+    output:
+        f"{FIGS}/closure.tex",
+    shell:
+        skeleton("S5")
+
+
+# S6: fit.  Sees the prior, the depos and the data frames -- never the truth.
+rule fit:
+    input:
+        depos=rules.laser_depos.output.depos,
+        data=rules.data.output,
+        prior=f"{R}/prior/{{name}}.json.bz2",
+        closure=rules.forward_closure.output,
+    output:
+        f"{R}/fit/{{name}}/learned-fr.json.bz2",
+    shell:
+        skeleton("S6")
+
+
+# S7: score the learned FR against truth, and re-simulate it in WCT.
+rule score:
+    input:
+        learned=f"{R}/fit/{{name}}/learned-fr.json.bz2",
+        truth=BAD,
+        prior=f"{R}/prior/{{name}}.json.bz2",
+    output:
+        f"{FIGS}/score-{{name}}.tex",
+    shell:
+        skeleton("S7")

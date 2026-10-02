@@ -351,11 +351,14 @@ class Response:
 
 def response(cm: CombinedModel, impacts: int = 11, y_start: float | str = "auto",
              tick: float = 0.1, max_time: float = 200.0, n_wires: int | None = None,
-             half_pitch: bool = True, substeps: int = 4) -> Response:
+             half_pitch: bool = True, substeps: int = 4,
+             impact_nudge: float = 0.0) -> Response:
     """Compute the field response of every plane to a drifting electron.
 
     ``impacts`` starting positions are spread over half a pitch (the geometry is
     symmetric about the wire) or a whole pitch when ``half_pitch`` is False.
+    ``impact_nudge`` (mm) moves an impact at exactly x = 0 to x = impact_nudge;
+    the returned ``impact`` still reports the nominal grid.
     """
     planes = [e.name for e in cm.cfg.electrodes_by_y if e.name in cm.weighting]
     if not planes:
@@ -375,7 +378,8 @@ def response(cm: CombinedModel, impacts: int = 11, y_start: float | str = "auto"
     x0 = np.linspace(0.0, span, impacts) if half_pitch else (
         np.linspace(-0.5 * pitch, 0.5 * pitch, impacts))
 
-    traj = trajectories(cm, x0, y_start, tick=tick, max_time=max_time,
+    x_launch = np.where(x0 == 0.0, impact_nudge, x0) if impact_nudge else x0
+    traj = trajectories(cm, x_launch, y_start, tick=tick, max_time=max_time,
                         substeps=substeps)
 
     if n_wires is None:

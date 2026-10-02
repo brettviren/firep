@@ -1,0 +1,55 @@
+# ProtoDUNE-HD "bad APA" (WCT anode 0), drift solve: the W plane floats.
+#
+# The Garfield model behind np04hd-garfield-6paths-mcmc-bestfit (X. Ning,
+# others/CM_FieldResponse.pdf slide 7) is the default PDHD configuration with
+# only W changed, to 0 V:
+#
+#   plane    y [mm]    V [V]
+#   C      204.71   -10235.5     (as examples/drift-2d-pdsp.yaml)
+#   G       14.13     -665
+#   U        9.42     -370
+#   V        4.71        0       now the collection plane
+#   W        0.00        0       floating; config.yaml:bad_apa.w_potential
+#   M       -4.71        0       mesh; position not yet confirmed (the
+#                                nominal examples/drift-2d-pdsp.yaml has -4.79)
+#
+# Pitch 4.71 mm, wire diameter 150 um on every plane.  Roles are informational
+# in firep (reports only); they are swapped here to match the physics.
+#
+#   firep bias  -c firep/bad-apa-drift.yaml
+#   firep bias  -c firep/bad-apa-drift.yaml --set electrodes.3.bias=-100
+version: 1
+name: pdhd-bad-apa-drift
+
+domain:
+  dimension: 2
+  bounds:
+    x: [-2.355, 2.355]     # half a pitch either side of the central wire
+    y: [-4.71, 204.71]     # mesh to cathode
+  boundaries:
+    x: {type: periodic}
+    ylo: {type: dirichlet, role: mesh,    potential: 0.0}
+    yhi: {type: dirichlet, role: cathode, potential: -10235.5}
+
+electrodes:
+  - {name: g, kind: wire, role: grid,       plane: 14.13, bias: -665.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 1}}
+  - {name: u, kind: wire, role: induction,  plane: 9.42,  bias: -370.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 1}}
+  - {name: v, kind: wire, role: collection, plane: 4.71,  bias: 0.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 1}}
+  - {name: w, kind: wire, role: induction,  plane: 0.0,   bias: 0.0,
+     shape: {radius: 0.075}, lattice: {pitch: 4.71, count: 1}}
+
+bias:
+  mode: explicit
+  drift_field: 500.0
+
+problem:
+  kind: drift
+
+response:
+  impacts: 6               # the Garfield impact grid; firep can go finer
+  max_time: 300.0
+
+grid: {nx: 201, ny: 841}

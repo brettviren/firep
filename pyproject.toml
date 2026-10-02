@@ -19,6 +19,8 @@ firep = "firep.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+# design optimisation (scripts/pixel_optimize.py): bounded L-BFGS-B
+opt = ["scipy>=1.10"]
 
 [build-system]
 requires = ["hatchling"]
